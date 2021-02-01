@@ -253,6 +253,43 @@ Program 2
         )
 
 
+def test_abbreviated_link() -> None:
+    with make_test(
+        {
+            Path(
+                "source/index.txt"
+            ): """
+.. method:: db.collection.watch()
+
+:method:`~db.collection.watch`
+""",
+        }
+    ) as result:
+        assert not [
+            diagnostics for diagnostics in result.diagnostics.values() if diagnostics
+        ], "Should not raise any diagnostics"
+
+        page = result.pages[FileId("index.txt")]
+        print(ast_to_testing_string(page.ast))
+        check_ast_testing_string(
+            page.ast,
+            """
+<root fileid="index.txt">
+    <target domain="mongodb" name="method" html_id="mongodb-method-db.collection.watch">
+        <directive_argument><literal><text>db.collection.watch()</text></literal></directive_argument>
+        <target_identifier ids="['db.collection.watch']"><text>db.collection.watch()</text></target_identifier>
+    </target>
+
+    <paragraph>
+        <ref_role domain="mongodb" name="method" target="db.collection.watch" flag="~" fileid="['index', 'mongodb-method-db.collection.watch']">
+            <literal><text>watch()</text></literal>
+        </ref_role>
+    </paragraph>
+</root>
+        """,
+        )
+
+
 def test_language_selector() -> None:
     with make_test(
         {
@@ -934,3 +971,121 @@ Paragraph
             )
             == 3
         ), "Should raise 3 diagnostics"
+
+
+def test_named_references() -> None:
+    with make_test(
+        {
+            # Valid extlink reference
+            Path(
+                "source/valid.txt"
+            ): """
+.. _`MongoDB, Inc.`: https://www.mongodb.com?tck=snooty
+
+Link to `MongoDB, Inc.`_
+""",
+            # Valid extlink reference
+            Path(
+                "source/alternate.txt"
+            ): """
+Defining `docs link <https://docs.mongodb.com>`_
+
+Referencing `docs link`_
+""",
+            # Reference to nonexistent extlink
+            Path(
+                "source/nonexistent.txt"
+            ): """
+Link to `nonexistent`_
+""",
+            # Attempt to redefine extlink
+            Path(
+                "source/duplicate.txt"
+            ): """
+This is `GitHub <https://github.com>`_
+
+This is not `GitHub <https://twitter.com>`_
+
+Reference `GitHub`_
+""",
+        },
+    ) as result:
+
+        active_file = "valid.txt"
+        assert not result.diagnostics[FileId(active_file)]
+        page = result.pages[FileId(active_file)]
+        check_ast_testing_string(
+            page.ast,
+            """
+<root fileid="valid.txt">
+    <named_reference refname="MongoDB, Inc." refuri="https://www.mongodb.com?tck=snooty" />
+    <paragraph>
+        <text>Link to </text>
+        <reference refname="MongoDB, Inc." refuri="https://www.mongodb.com?tck=snooty"><text>MongoDB, Inc.</text></reference>
+    </paragraph>
+</root>
+""",
+        )
+
+        active_file = "alternate.txt"
+        assert not result.diagnostics[FileId(active_file)]
+        page = result.pages[FileId(active_file)]
+        check_ast_testing_string(
+            page.ast,
+            """
+<root fileid="alternate.txt">
+    <paragraph>
+        <text>Defining </text>
+        <reference refuri="https://docs.mongodb.com"><text>docs link</text></reference>
+        <named_reference refname="docs link" refuri="https://docs.mongodb.com" />
+    </paragraph>
+    <paragraph>
+        <text>Referencing </text>
+        <reference refname="docs link" refuri="https://docs.mongodb.com"><text>docs link</text></reference>
+    </paragraph>
+</root>
+""",
+        )
+
+        active_file = "nonexistent.txt"
+        diagnostics = result.diagnostics[FileId(active_file)]
+        assert len(diagnostics) == 1
+        assert isinstance(diagnostics[0], TargetNotFound)
+        page = result.pages[FileId(active_file)]
+        check_ast_testing_string(
+            page.ast,
+            """
+<root fileid="nonexistent.txt">
+    <paragraph>
+        <text>Link to </text>
+        <reference refname="nonexistent"><text>nonexistent</text></reference>
+    </paragraph>
+</root>
+""",
+        )
+
+        active_file = "duplicate.txt"
+        diagnostics = result.diagnostics[FileId(active_file)]
+        assert len(diagnostics) == 1
+        page = result.pages[FileId(active_file)]
+        check_ast_testing_string(
+            page.ast,
+            """
+<root fileid="duplicate.txt">
+    <paragraph>
+        <text>This is </text>
+        <reference refuri="https://github.com"><text>GitHub</text></reference>
+        <named_reference refname="GitHub" refuri="https://github.com" />
+    </paragraph>
+    <paragraph>
+        <text>This is not </text>
+        <reference refuri="https://twitter.com"><text>GitHub</text></reference>
+        <named_reference refname="GitHub" refuri="https://twitter.com" />
+    </paragraph>
+    <paragraph>
+        <text>Reference </text>
+        <reference refname="GitHub" refuri="https://twitter.com"><text>GitHub</text></reference>
+    </paragraph>
+</root>
+""",
+        )

@@ -21,6 +21,7 @@ from typing import (
     Optional,
     Set,
     Tuple,
+    Union,
     cast,
 )
 
@@ -31,6 +32,7 @@ import watchdog.events
 from typing_extensions import Protocol
 
 from . import gizaparser, n, rstparser, specparser, util
+from .builders import man
 from .cache import Cache
 from .diagnostics import (
     CannotOpenFile,
@@ -221,9 +223,7 @@ class JSONVisitor:
             )
             raise docutils.nodes.SkipDeparture()
         elif isinstance(node, rstparser.target_directive):
-            self.state.append(
-                n.Target((line,), [], node["domain"], node["name"], None, None)
-            )
+            self.state.append(n.Target((line,), [], node["domain"], node["name"], None))
         elif isinstance(node, rstparser.directive):
             directive = self.handle_directive(node, line)
             if directive:
@@ -273,17 +273,18 @@ class JSONVisitor:
             assert (
                 len(node["ids"]) <= 1
             ), f"Too many ids in this node: {self.docpath} {node}"
-            if "refuri" in node:
-                raise docutils.nodes.SkipNode()
-
             if not node["ids"]:
                 self.diagnostics.append(InvalidURL(util.get_line(node)))
                 raise docutils.nodes.SkipNode()
 
             node_id = node["names"][0]
+
+            if "refuri" in node:
+                self.state.append(n.NamedReference((line,), node_id, node["refuri"]))
+                return
+
             children: Any = [n.TargetIdentifier((line,), [], [node_id])]
-            refuri = node["refuri"] if "refuri" in node else None
-            self.state.append(n.Target((line,), children, "std", "label", refuri, None))
+            self.state.append(n.Target((line,), children, "std", "label", None))
         elif isinstance(node, rstparser.target_identifier):
             self.state.append(n.TargetIdentifier((line,), [], node["ids"]))
         elif isinstance(node, docutils.nodes.definition_list):
@@ -435,7 +436,7 @@ class JSONVisitor:
                 term_text = "".join(term.get_text() for term in item.term)
                 identifier = n.TargetIdentifier(item.start, [], [term_text])
                 identifier.children = item.term[:]
-                target = n.InlineTarget(item.start, [], "std", "term", None, None)
+                target = n.InlineTarget(item.start, [], "std", "term", None)
                 target.children = [identifier]
                 item.term.append(target)
 
@@ -1002,6 +1003,12 @@ class PageDatabase:
         self.parsed[key] = value
         self.__changed_pages.add(key)
 
+    def get(self, key: FileId) -> Optional[Page]:
+        try:
+            return self[key]
+        except KeyError:
+            return None
+
     def __getitem__(self, key: FileId) -> Page:
         """If the postprocessor has been run since modifications were made, fetch a postprocessed page."""
         assert not self.__changed_pages
@@ -1297,12 +1304,11 @@ class _Project:
         if postprocess:
             post_metadata, post_diagnostics = self.pages.flush()
 
-            static_files = {
+            static_files: Dict[str, Union[str, bytes]] = {
                 "objects.inv": self.targets.generate_inventory("").dumps(
                     self.config.name, ""
                 )
             }
-            post_metadata["static_files"] = static_files
 
             with util.PerformanceLogger.singleton().start("commit"):
                 for fileid, page in self.pages.items():
@@ -1311,6 +1317,22 @@ class _Project:
                     )
                 self.backend.flush()
 
+            # Build manpages
+            for name, definition in self.config.manpages.items():
+                fileid = FileId(definition.file)
+                manpage_page = self.pages.get(fileid)
+                if not manpage_page:
+                    self.backend.on_diagnostics(
+                        FileId(self.config.config_path.relative_to(self.config.root)),
+                        [CannotOpenFile(Path(fileid), "Page not found", 0)],
+                    )
+                    continue
+                for filename, rendered in man.render(
+                    manpage_page, name, definition.title, definition.section
+                ).items():
+                    static_files[filename.as_posix()] = rendered
+
+            post_metadata["static_files"] = static_files
             for fileid, diagnostics in post_diagnostics.items():
                 self.backend.on_diagnostics(fileid, diagnostics)
 
